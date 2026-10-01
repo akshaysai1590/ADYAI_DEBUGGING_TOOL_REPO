@@ -3,12 +3,16 @@ import { persist } from 'zustand/middleware';
 
 interface AuthState {
   token: string | null;
-  teamId: string | null; // e.g. "DBG01"
-  teamDbId: string | null; // UUID from DB
+  teamId: string | null;        // e.g. "DBG01"
+  teamDbId: string | null;      // UUID from DB
   displayName: string | null;
+  sessionToken: string | null;  // unique session for concurrency blocking
+  selectedLanguage: string | null; // locked language for current round
   isAdmin: boolean;
   setTeamLogin: (token: string, teamId: string, displayName: string, teamDbId?: string) => void;
   setAdminLogin: (token: string) => void;
+  setSessionToken: (token: string) => void;
+  setSelectedLanguage: (lang: string) => void;
   logout: () => void;
 }
 
@@ -19,6 +23,8 @@ export const useAuthStore = create<AuthState>()(
       teamId: null,
       teamDbId: null,
       displayName: null,
+      sessionToken: null,
+      selectedLanguage: null,
       isAdmin: false,
       setTeamLogin: (token, teamId, displayName, teamDbId) => 
         set({ 
@@ -30,7 +36,12 @@ export const useAuthStore = create<AuthState>()(
         }),
       setAdminLogin: (token) => 
         set({ token, teamId: null, teamDbId: null, displayName: null, isAdmin: true }),
-      logout: () => set({ token: null, teamId: null, teamDbId: null, displayName: null, isAdmin: false }),
+      setSessionToken: (sessionToken) => set({ sessionToken }),
+      setSelectedLanguage: (selectedLanguage) => set({ selectedLanguage }),
+      logout: () => set({ 
+        token: null, teamId: null, teamDbId: null, displayName: null, 
+        isAdmin: false, sessionToken: null, selectedLanguage: null 
+      }),
     }),
     {
       name: 'adhyant-auth-storage',

@@ -21,3 +21,11 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Test artifacts
+frontend/playwright-report/
+frontend/test-results/

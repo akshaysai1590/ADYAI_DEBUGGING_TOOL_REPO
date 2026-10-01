@@ -2,11 +2,11 @@ import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Code2, KeyRound, Users, UserCircle, Shield, Trophy } from 'lucide-react';
 import { useAuthStore } from '../store/auth';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 
 export const Join = () => {
   const navigate = useNavigate();
-  const setTeamLogin = useAuthStore(state => state.setTeamLogin);
+  const { setTeamLogin, setSessionToken } = useAuthStore();
   
   const [teamId, setTeamId] = useState('');
   const [pin, setPin] = useState('');
@@ -20,60 +20,18 @@ export const Join = () => {
     setError('');
 
     try {
-      const cleanTeamId = teamId.trim().toUpperCase();
-      const cleanPin = pin.trim();
-
-      // Check Supabase teams table
-      const { data: team, error: dbError } = await supabase
-        .from('teams')
-        .select('*')
-        .ilike('team_id', cleanTeamId)
-        .maybeSingle();
-
-      if (team && !dbError) {
-        if (team.status === 'disqualified') {
-          setError('This team has been disqualified.');
-          setLoading(false);
-          return;
-        }
-
-        if (team.pin_hash === cleanPin) {
-          const finalName = displayName.trim() || team.display_name || cleanTeamId;
-          
-          // Optionally update display_name in DB if provided
-          if (displayName.trim() && displayName.trim() !== team.display_name) {
-            await supabase.from('teams').update({ display_name: finalName }).eq('id', team.id);
-          }
-
-          setTeamLogin('team-session-token', team.team_id, finalName, team.id);
-          navigate('/lobby');
-          return;
-        } else {
-          setError('Incorrect PIN for this Team ID.');
-          setLoading(false);
-          return;
-        }
-      }
-
-      // Demo fallback if team is not in DB yet
-      if (cleanPin === '1234') {
-        setTeamLogin('demo-token', cleanTeamId, displayName.trim() || cleanTeamId, '33333333-3333-3333-3333-333333333333');
-        navigate('/lobby');
-        return;
-      }
-
-      setError('Team ID not found. Please check with the organizers or use PIN 1234 for demo.');
-      setLoading(false);
+      const data = await api.join({
+        team_id: teamId.trim().toUpperCase(),
+        pin: pin.trim(),
+        display_name: displayName.trim(),
+      });
+      setTeamLogin('team-session-token', data.teamId, data.displayName, data.teamDbId);
+      setSessionToken(data.sessionToken);
+      navigate('/lobby');
     } catch (err: any) {
-      console.error('Join error:', err);
-      // Fallback
-      if (pin.trim() === '1234') {
-        setTeamLogin('demo-token', teamId.toUpperCase(), displayName || teamId, '33333333-3333-3333-3333-333333333333');
-        navigate('/lobby');
-      } else {
-        setError(err.message || 'Failed to verify team credentials');
-        setLoading(false);
-      }
+      setError(err?.message || 'Failed to verify team credentials');
+    } finally {
+      setLoading(false);
     }
   };
 

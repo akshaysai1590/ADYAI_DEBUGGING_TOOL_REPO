@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Editor, { useMonaco } from '@monaco-editor/react';
-import { Play, RotateCcw, Send, AlertTriangle, CheckCircle2, ShieldAlert, ArrowLeft, Clock } from 'lucide-react';
+import { Play, RotateCcw, Send, AlertTriangle, CheckCircle2, ShieldAlert, ArrowLeft, Clock, Code2 } from 'lucide-react';
 import { useAuthStore } from '../store/auth';
 import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import type { SupportedLanguage, MultiLangQuestion } from '../lib/questionTemplates';
 import { 
   DEFAULT_QUESTIONS, 
@@ -15,23 +16,36 @@ export const Contest = () => {
   const navigate = useNavigate();
   const monaco = useMonaco();
   const editorRef = useRef<any>(null);
-  const { teamId, teamDbId, displayName } = useAuthStore();
+  const { teamId, teamDbId, displayName, selectedLanguage, setSelectedLanguage, sessionToken } = useAuthStore();
 
   const [questions, setQuestions] = useState<MultiLangQuestion[]>(DEFAULT_QUESTIONS);
   const [activeQuestion, setActiveQuestion] = useState<MultiLangQuestion>(DEFAULT_QUESTIONS[0]);
-  const [selectedLang, setSelectedLang] = useState<SupportedLanguage>('python');
-  const [code, setCode] = useState<string>(DEFAULT_QUESTIONS[0].variants.python.buggy_code);
+  const [code, setCode] = useState<string>('');
   const [output, setOutput] = useState<{ status: 'idle' | 'running' | 'pass' | 'fail' | 'error', details?: string, actual?: string }>({ status: 'idle' });
   const [timeLeft, setTimeLeft] = useState<number>(1800);
   const [roundName, setRoundName] = useState<string>('Live Round');
   const [tabViolations, setTabViolations] = useState<number>(0);
   const [showWarningModal, setShowWarningModal] = useState<boolean>(false);
   const [submittedQuestions, setSubmittedQuestions] = useState<Set<string>>(new Set());
+  const [showLangPicker, setShowLangPicker] = useState<boolean>(!selectedLanguage);
+  const [timesUp, setTimesUp] = useState<boolean>(false);
 
   // 1. Initial Load: Fetch active round & questions
   useEffect(() => {
     fetchActiveRoundAndQuestions();
   }, []);
+
+  // Restore previously-submitted (locked) questions after a reload
+  useEffect(() => {
+    if (!teamDbId || !sessionToken) return;
+    api.participant({ action: 'get_my_submissions', team_id: teamDbId, session_token: sessionToken })
+      .then((res) => {
+        if (res.submissions?.length) {
+          setSubmittedQuestions(new Set(res.submissions.map((s: any) => s.question_id)));
+        }
+      })
+      .catch(() => {});
+  }, [teamDbId, sessionToken]);
 
   const fetchActiveRoundAndQuestions = async () => {
     try {
@@ -63,17 +77,43 @@ export const Contest = () => {
           const parsed = qData.map(resolveMultiLangQuestion);
           setQuestions(parsed);
           setActiveQuestion(parsed[0]);
-          loadCodeForQuestion(parsed[0], selectedLang);
+          if (selectedLanguage) {
+            loadCodeForQuestion(parsed[0], selectedLanguage as SupportedLanguage);
+          }
         }
+      } else {
+        // No active round
+        handleRoundEnd();
       }
     } catch (err) {
       console.error('Error fetching questions:', err);
     }
   };
 
-  // 2. Drafts & LocalStorage Persistence per Language
-  const loadCodeForQuestion = (q: MultiLangQuestion, lang: SupportedLanguage) => {
+  const handleRoundEnd = () => {
+    setTimesUp(true);
+    setTimeout(() => {
+      navigate('/lobby');
+    }, 10000);
+  };
+
+  // 2. Load Drafts from DB / LocalStorage
+  const loadCodeForQuestion = async (q: MultiLangQuestion, lang: SupportedLanguage) => {
     const variant = q.variants[lang] || q.variants.python;
+    
+    if (teamDbId && sessionToken) {
+      try {
+        const res = await api.participant({ action: 'get_draft', team_id: teamDbId, session_token: sessionToken, question_id: q.id });
+        if (res.code) {
+          setCode(res.code);
+          setOutput({ status: 'idle' });
+          return;
+        }
+      } catch (e) {
+        console.error('load draft error:', e);
+      }
+    }
+
     const saved = localStorage.getItem(`draft_${teamId}_${q.id}_${lang}`);
     if (saved) {
       setCode(saved);
@@ -83,35 +123,71 @@ export const Contest = () => {
     setOutput({ status: 'idle' });
   };
 
+  // Save Draft to DB Debounced
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (activeQuestion && code && teamDbId && sessionToken && selectedLanguage) {
+        api.participant({
+          action: 'save_draft',
+          team_id: teamDbId,
+          session_token: sessionToken,
+          question_id: activeQuestion.id,
+          code,
+        }).catch(() => {});
+      }
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [code, activeQuestion, teamDbId, sessionToken, selectedLanguage]);
+
   const handleCodeChange = (newVal: string | undefined) => {
     const updated = newVal || '';
     setCode(updated);
-    if (activeQuestion) {
-      localStorage.setItem(`draft_${teamId}_${activeQuestion.id}_${selectedLang}`, updated);
+    if (activeQuestion && selectedLanguage) {
+      localStorage.setItem(`draft_${teamId}_${activeQuestion.id}_${selectedLanguage}`, updated);
     }
   };
 
-  // Switch Language handler
-  const handleLanguageChange = (newLang: SupportedLanguage) => {
-    setSelectedLang(newLang);
-    loadCodeForQuestion(activeQuestion, newLang);
+  const confirmLanguage = async (langId: string) => {
+    setSelectedLanguage(langId);
+    setShowLangPicker(false);
+    
+    if (teamDbId && sessionToken) {
+      api.participant({ action: 'set_language', team_id: teamDbId, session_token: sessionToken, language: langId }).catch(() => {});
+    }
+    
+    if (activeQuestion) {
+      loadCodeForQuestion(activeQuestion, langId as SupportedLanguage);
+    }
   };
 
-  // 3. Server-synced countdown timer
+  // 3. Server-synced countdown timer and Realtime listener
   useEffect(() => {
     const timer = setInterval(() => {
       setTimeLeft(prev => {
         if (prev <= 1) {
           clearInterval(timer);
-          alert('⏰ TIME IS UP! The round has ended.');
-          navigate('/lobby');
+          handleRoundEnd();
           return 0;
         }
         return prev - 1;
       });
     }, 1000);
     return () => clearInterval(timer);
-  }, [navigate]);
+  }, []);
+
+  useEffect(() => {
+    const channel = supabase.channel('public:rounds')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rounds' }, (payload) => {
+        if (payload.new.status !== 'active') {
+          handleRoundEnd();
+        }
+      })
+      .subscribe();
+      
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
 
   const formatTimer = (seconds: number) => {
     const m = Math.floor(seconds / 60).toString().padStart(2, '0');
@@ -119,22 +195,35 @@ export const Contest = () => {
     return `${m}:${s}`;
   };
 
-  // 4. Anti-Cheat: Tab Switch & Window Blur Detection
+  // 4. Anti-Cheat & Heartbeat
   useEffect(() => {
+    if (!teamDbId || !sessionToken) return;
+
+    // Heartbeat
+    const sendHeartbeat = () => {
+      api.participant({
+        action: 'heartbeat',
+        team_id: teamDbId,
+        session_token: sessionToken,
+        current_page: 'contest',
+      }).catch(() => {});
+    };
+    sendHeartbeat();
+    const hbInterval = setInterval(sendHeartbeat, 30000);
+
     const handleVisibilityChange = async () => {
       if (document.hidden) {
         setTabViolations(prev => {
           const next = prev + 1;
           setShowWarningModal(true);
           
-          if (teamDbId) {
-            supabase.from('violations').insert({
-              team_id: teamDbId,
-              violation_type: 'tab_switch',
-              details: { violation_number: next, timestamp: new Date().toISOString() }
-            }).then(() => {}, () => {});
-          }
-
+          api.participant({
+            action: 'log_violation',
+            team_id: teamDbId,
+            session_token: sessionToken,
+            violation_type: 'tab_switch',
+            details: { violation_number: next, timestamp: new Date().toISOString() },
+          }).catch(() => {});
           return next;
         });
       }
@@ -150,13 +239,14 @@ export const Contest = () => {
     window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
+      clearInterval(hbInterval);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('beforeunload', handleBeforeUnload);
     };
-  }, [teamDbId]);
+  }, [teamDbId, sessionToken]);
 
-  // Current active variant
-  const currentVariant = activeQuestion.variants[selectedLang] || activeQuestion.variants.python;
+  const activeLang = (selectedLanguage as SupportedLanguage) || 'python';
+  const currentVariant = activeQuestion.variants[activeLang] || activeQuestion.variants.python;
 
   // Real-time refs to completely eliminate stale closure bugs
   const editableRangesRef = useRef<number[][]>(currentVariant.editable_line_ranges);
@@ -198,7 +288,6 @@ export const Contest = () => {
       });
     }
 
-    // Pass old decorations so Monaco clears them
     decorationsRef.current = editor.deltaDecorations(decorationsRef.current, newDecorations);
   };
 
@@ -254,22 +343,14 @@ export const Contest = () => {
     setOutput({ status: 'running' });
 
     try {
-      const res = await fetch('https://ztiifyaoxyeefxokqben.supabase.co/functions/v1/evaluate', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-        },
-        body: JSON.stringify({
-          question_id: activeQuestion.id,
-          team_id: teamDbId || '33333333-3333-3333-3333-333333333333',
-          code: code,
-          language: selectedLang,
-          action: action,
-        }),
+      const data = await api.evaluate({
+        question_id: activeQuestion.id,
+        team_id: teamDbId,
+        session_token: sessionToken,
+        code,
+        language: selectedLanguage,
+        action,
       });
-
-      const data = await res.json();
 
       if (data.is_correct === true) {
         setOutput({ status: 'pass', actual: data.actual_output });
@@ -288,29 +369,89 @@ export const Contest = () => {
       }
 
     } catch (err: any) {
-      console.error('Fetch error:', err);
+      console.error('Execute error:', err);
       setOutput({ status: 'error', details: err?.message || 'Network error' });
     }
   };
 
   const handleReset = () => {
-    if (confirm(`Reset ${currentVariant.label} code back to original version? All unsaved edits in this language will be lost.`)) {
+    if (confirm(`Reset ${currentVariant.label} code back to original version? All unsaved edits will be lost.`)) {
       setCode(currentVariant.buggy_code);
-      localStorage.removeItem(`draft_${teamId}_${activeQuestion.id}_${selectedLang}`);
+      localStorage.removeItem(`draft_${teamId}_${activeQuestion.id}_${selectedLanguage}`);
+      if (teamDbId && sessionToken) {
+        api.participant({ action: 'delete_draft', team_id: teamDbId, session_token: sessionToken, question_id: activeQuestion.id }).catch(() => {});
+      }
       setOutput({ status: 'idle' });
     }
   };
 
   const handleQuestionSelect = (q: MultiLangQuestion) => {
     setActiveQuestion(q);
-    loadCodeForQuestion(q, selectedLang);
+    loadCodeForQuestion(q, activeLang);
   };
 
   const isQuestionLocked = submittedQuestions.has(activeQuestion.id);
 
+  if (showLangPicker) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', backgroundColor: 'var(--bg-primary)', justifyContent: 'center', alignItems: 'center' }}>
+        <div className="card" style={{ maxWidth: '600px', width: '100%', padding: '2.5rem', textAlign: 'center' }}>
+          <Code2 size={48} color="var(--accent-primary)" style={{ marginBottom: '1rem' }} />
+          <h2 style={{ color: 'var(--text-primary)', marginBottom: '0.5rem', fontSize: '1.8rem' }}>Choose Your Language</h2>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem', lineHeight: '1.6' }}>
+            Select the programming language you will use for this round. <br />
+            <strong style={{ color: 'var(--warning)' }}>This choice is final and cannot be changed once the round begins.</strong>
+          </p>
+          
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '1rem' }}>
+            {LANGUAGE_OPTIONS.map((lang) => (
+              <button
+                key={lang.id}
+                onClick={() => confirmLanguage(lang.id)}
+                className="btn-outline"
+                style={{
+                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.75rem',
+                  padding: '1.5rem', border: '2px solid var(--border)', borderRadius: '12px',
+                  backgroundColor: 'var(--bg-secondary)', cursor: 'pointer', transition: 'all 0.2s',
+                  color: 'var(--text-primary)'
+                }}
+                onMouseOver={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--accent-primary)';
+                  (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'var(--bg-tertiary)';
+                }}
+                onMouseOut={(e) => {
+                  (e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--border)';
+                  (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'var(--bg-secondary)';
+                }}
+              >
+                <span style={{ fontSize: '2rem' }}>{lang.icon}</span>
+                <span style={{ fontWeight: 700 }}>{lang.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', backgroundColor: 'var(--bg-primary)', position: 'relative' }}>
       
+      {/* Time's Up Modal */}
+      {timesUp && (
+        <div style={{
+          position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.95)', zIndex: 10000,
+          display: 'flex', justifyContent: 'center', alignItems: 'center', flexDirection: 'column'
+        }}>
+          <Clock size={80} color="var(--error)" style={{ marginBottom: '2rem', animation: 'pulse 2s infinite' }} />
+          <h1 style={{ margin: '0 0 1rem 0', color: 'var(--error)', fontSize: '4rem', fontWeight: 900, textTransform: 'uppercase' }}>Time's Up!</h1>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '1.2rem' }}>
+            The round has concluded. You are being redirected to the lobby...
+          </p>
+        </div>
+      )}
+
       {/* Anti-cheat Warning Modal */}
       {showWarningModal && (
         <div style={{
@@ -318,11 +459,13 @@ export const Contest = () => {
           backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 9999,
           display: 'flex', justifyContent: 'center', alignItems: 'center'
         }}>
-          <div className="card" style={{ maxWidth: '440px', textAlign: 'center', padding: '2.5rem 2rem', border: '2px solid var(--error)' }}>
+          <div className="card" style={{ maxWidth: '460px', textAlign: 'center', padding: '2.5rem 2rem', border: '2px solid var(--error)' }}>
             <ShieldAlert size={56} color="var(--error)" style={{ marginBottom: '1rem' }} />
             <h2 style={{ margin: '0 0 0.5rem 0', color: 'var(--error)' }}>Tab Switch Detected!</h2>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem', lineHeight: '1.6' }}>
-              Warning #{tabViolations}: You navigated away from the contest window. Switching tabs or opening external resources is strictly forbidden and logged to proctors.
+              Warning #{tabViolations}: You navigated away from the contest window. Switching tabs or opening external resources is strictly forbidden. 
+              <br/><br/>
+              <strong style={{ color: 'var(--text-primary)' }}>This incident has been logged. Disqualification is at the discretion of the admin.</strong>
             </p>
             <button 
               className="btn" 
@@ -360,7 +503,7 @@ export const Contest = () => {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '2rem' }}>
           {tabViolations > 0 && (
-            <span style={{ color: 'var(--error)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+            <span style={{ color: 'var(--error)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.3rem', fontWeight: 600 }}>
               <ShieldAlert size={14} /> {tabViolations} violation{tabViolations > 1 ? 's' : ''} logged
             </span>
           )}
@@ -428,49 +571,15 @@ export const Contest = () => {
             gap: '0.75rem'
           }}>
             
-            {/* Language Switcher Buttons / Toggle */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-              <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', fontWeight: 600 }}>
-                Language:
-              </span>
-              <div style={{ 
-                display: 'inline-flex', 
-                backgroundColor: 'var(--bg-secondary)', 
-                borderRadius: '8px', 
-                padding: '3px',
-                border: '1px solid var(--border)',
-                gap: '2px'
-              }}>
-                {LANGUAGE_OPTIONS.map((opt) => {
-                  const isSelected = selectedLang === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      onClick={() => handleLanguageChange(opt.id)}
-                      disabled={isQuestionLocked}
-                      style={{
-                        padding: '0.35rem 0.75rem',
-                        borderRadius: '6px',
-                        border: 'none',
-                        cursor: isQuestionLocked ? 'not-allowed' : 'pointer',
-                        fontSize: '0.85rem',
-                        fontWeight: isSelected ? 700 : 500,
-                        backgroundColor: isSelected ? 'var(--accent-primary)' : 'transparent',
-                        color: isSelected ? '#ffffff' : 'var(--text-secondary)',
-                        transition: 'all 0.15s ease',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '0.35rem'
-                      }}
-                    >
-                      <span>{opt.icon}</span>
-                      <span>{opt.label}</span>
-                    </button>
-                  );
-                })}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', backgroundColor: 'var(--bg-secondary)', padding: '0.4rem 0.8rem', borderRadius: '6px', border: '1px solid var(--border)' }}>
+                <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Language:</span>
+                <strong style={{ color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.9rem' }}>
+                  {LANGUAGE_OPTIONS.find(l => l.id === activeLang)?.icon} {LANGUAGE_OPTIONS.find(l => l.id === activeLang)?.label}
+                </strong>
               </div>
 
-              <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginLeft: '0.5rem' }}>
+              <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
                 Editable lines: <strong style={{ color: 'var(--accent-primary)', fontFamily: 'monospace' }}>
                   {currentVariant.editable_line_ranges.map(r => `${r[0]}-${r[1]}`).join(', ')}
                 </strong>
@@ -545,7 +654,7 @@ export const Contest = () => {
                 {output.status === 'running' && (
                   <>
                     <span className="spin" style={{ display: 'inline-block', width: '20px', height: '20px', borderRadius: '50%', border: '2px solid var(--accent-primary)', borderTopColor: 'transparent' }} />
-                    <span>Executing {currentVariant.label} code in isolated Docker sandbox on AWS...</span>
+                    <span>Executing {currentVariant.label} code in isolated Docker sandbox...</span>
                   </>
                 )}
                 {output.status === 'pass' && (

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Trophy, ArrowLeft, RefreshCw, Maximize2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 
 interface TeamScore {
   team_id_str: string;
@@ -38,66 +39,18 @@ export const Scoreboard = () => {
       const { data: roundData } = await supabase.from('rounds').select('*').order('round_number');
       if (roundData) setRounds(roundData);
 
-      // 2. Fetch all teams
-      const { data: teamsData } = await supabase.from('teams').select('*');
-      if (!teamsData) return;
-
-      // 3. Fetch submissions
-      let subQuery = supabase.from('submissions').select('*, questions(round_id)');
-      const { data: subData } = await subQuery;
-
-      // 4. Calculate scores per team
-      const scoresMap: Record<string, TeamScore> = {};
-
-      teamsData.forEach(t => {
-        scoresMap[t.id] = {
-          team_id_str: t.team_id,
-          display_name: t.display_name || t.team_id,
-          score: 0,
-          solved_count: 0,
-          last_submission_time: null,
-          status: t.status || 'active',
-        };
-      });
-
-      if (subData) {
-        subData.forEach(sub => {
-          // If a specific round is selected, filter submissions for that round
-          if (selectedRound !== 'overall') {
-            const qRoundId = sub.questions?.round_id;
-            if (qRoundId !== selectedRound) return;
-          }
-
-          if (scoresMap[sub.team_id]) {
-            if (sub.is_correct) {
-              scoresMap[sub.team_id].score += (sub.marks_awarded || 10);
-              scoresMap[sub.team_id].solved_count += 1;
-
-              // Track latest correct submission timestamp for tie breaking
-              const currentSubTime = sub.submitted_at;
-              if (
-                !scoresMap[sub.team_id].last_submission_time ||
-                (currentSubTime && new Date(currentSubTime) > new Date(scoresMap[sub.team_id].last_submission_time!))
-              ) {
-                scoresMap[sub.team_id].last_submission_time = currentSubTime;
-              }
-            }
-          }
-        });
+      // Rankings computed server-side (teams/submissions are locked down post-RLS)
+      const data = await api.scoreboard(selectedRound === 'overall' ? undefined : selectedRound);
+      if (data.leaderboard) {
+        setLeaderboard(data.leaderboard.map((t: any) => ({
+          team_id_str: t.team_id_str,
+          display_name: t.display_name,
+          score: t.score,
+          solved_count: t.solved_count,
+          last_submission_time: t.finish_time ?? null,
+          status: t.status,
+        })));
       }
-
-      // 5. Convert to array and sort:
-      // High score first; if tie, earlier last_submission_time wins!
-      const sorted = Object.values(scoresMap).sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score;
-        if (b.solved_count !== a.solved_count) return b.solved_count - a.solved_count;
-        if (a.last_submission_time && b.last_submission_time) {
-          return new Date(a.last_submission_time).getTime() - new Date(b.last_submission_time).getTime();
-        }
-        return 0;
-      });
-
-      setLeaderboard(sorted);
       setLastRefreshed(new Date());
     } catch (err) {
       console.error('Error fetching scoreboard:', err);

@@ -2,22 +2,29 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Shield } from 'lucide-react';
 import { useAuthStore } from '../store/auth';
-
-const ADMIN_PASSWORD = 'adhyant2026'; // Change this before the event
+import { api, setAdminSecret } from '../lib/api';
 
 export const AdminLogin = () => {
   const navigate = useNavigate();
   const setAdminLogin = useAuthStore(s => s.setAdminLogin);
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (password === ADMIN_PASSWORD) {
+    setLoading(true);
+    setError('');
+    setAdminSecret(password);
+    try {
+      await api.admin({ action: 'ping' });
       setAdminLogin('admin-token');
       navigate('/admin');
-    } else {
+    } catch {
+      setAdminSecret(null);
       setError('Wrong password');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -31,7 +38,7 @@ export const AdminLogin = () => {
         {error && <div style={{ color: 'var(--error)', marginBottom: '1rem', textAlign: 'center' }}>{error}</div>}
         <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
           <input type="password" className="input-field" placeholder="Admin Password" value={password} onChange={e => setPassword(e.target.value)} />
-          <button type="submit" className="btn">Enter Admin Dashboard</button>
+          <button type="submit" className="btn" disabled={loading}>{loading ? 'Verifying...' : 'Enter Admin Dashboard'}</button>
         </form>
       </div>
     </div>

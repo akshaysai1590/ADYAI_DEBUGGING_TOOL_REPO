@@ -1,32 +1,74 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../store/auth';
 import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import { Clock, Users, PlayCircle, LogOut, ArrowRight, Trophy, AlertCircle } from 'lucide-react';
+
+const HEARTBEAT_INTERVAL = 15_000; // 15 seconds
 
 export const Lobby = () => {
   const navigate = useNavigate();
-  const { teamId, displayName, logout } = useAuthStore();
+  const { teamId, teamDbId, displayName, sessionToken, logout } = useAuthStore();
   
   const [activeRound, setActiveRound] = useState<any>(null);
-  const [connectedTeamsCount, setConnectedTeamsCount] = useState<number>(1);
+  const [connectedTeamsCount, setConnectedTeamsCount] = useState<number>(0);
   const [revealedRounds, setRevealedRounds] = useState<any[]>([]);
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // If not logged in, redirect to /join
+  // ── Auth guard ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!teamId) {
       navigate('/join');
       return;
     }
     
+    // Mark current page as lobby
+    updatePresence('lobby');
+
+    // Initial data fetch
     fetchLobbyState();
-    const interval = setInterval(fetchLobbyState, 3000); // Poll every 3 seconds
-    return () => clearInterval(interval);
+
+    // Start heartbeat (updates last_seen_at every 15s)
+    heartbeatRef.current = setInterval(() => {
+      updatePresence('lobby');
+    }, HEARTBEAT_INTERVAL);
+
+    // Set up realtime subscription for rounds
+    const channel = supabase
+      .channel('lobby-rounds')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'rounds' }, () => {
+        fetchLobbyState();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'teams' }, () => {
+        fetchTeamCount();
+      })
+      .subscribe();
+
+    return () => {
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+      supabase.removeChannel(channel);
+    };
   }, [teamId, navigate]);
 
+  // ── Presence heartbeat ────────────────────────────────────────────────────
+  const updatePresence = useCallback(async (page: string) => {
+    if (!teamDbId || !sessionToken) return;
+    try {
+      await api.participant({
+        action: 'heartbeat',
+        team_id: teamDbId,
+        session_token: sessionToken,
+        current_page: page,
+      });
+    } catch (err) {
+      console.error('Presence update error:', err);
+    }
+  }, [teamDbId, sessionToken]);
+
+  // ── Fetch lobby data ────────────────────────────────────────────────────
   const fetchLobbyState = async () => {
     try {
-      // 1. Fetch rounds
       const { data: rounds } = await supabase
         .from('rounds')
         .select('*')
@@ -38,20 +80,43 @@ export const Lobby = () => {
         setRevealedRounds(rounds.filter(r => r.scores_revealed));
       }
 
-      // 2. Fetch team count
-      const { count } = await supabase
-        .from('teams')
-        .select('*', { count: 'exact', head: true });
-
-      if (count !== null) setConnectedTeamsCount(count || 1);
+      await fetchTeamCount();
     } catch (err) {
-      console.error('Lobby poll error:', err);
+      console.error('Lobby fetch error:', err);
     }
   };
 
-  const handleLogout = () => {
+  const fetchTeamCount = async () => {
+    try {
+      const res = await api.participant({
+        action: 'team_count',
+        team_id: teamDbId,
+        session_token: sessionToken,
+      });
+      if (typeof res.count === 'number') setConnectedTeamsCount(res.count);
+    } catch (err) {
+      console.error('Team count error:', err);
+    }
+  };
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
+  const handleLogout = async () => {
+    // Clear presence on logout
+    if (teamDbId && sessionToken) {
+      api.participant({
+        action: 'logout',
+        team_id: teamDbId,
+        session_token: sessionToken,
+      }).catch(() => {});
+    }
     logout();
     navigate('/join');
+  };
+
+  const handleEnterContest = () => {
+    // Clear language choice so a fresh picker shows
+    useAuthStore.getState().setSelectedLanguage('');
+    navigate('/contest');
   };
 
   return (
@@ -126,7 +191,7 @@ export const Lobby = () => {
               </p>
               
               <button 
-                onClick={() => navigate('/contest')} 
+                onClick={handleEnterContest} 
                 className="btn" 
                 style={{ 
                   backgroundColor: 'var(--success)', 
@@ -149,7 +214,7 @@ export const Lobby = () => {
               <Clock size={68} color="var(--accent-primary)" style={{ marginBottom: '1.5rem', opacity: 0.8 }} />
               <h2 style={{ fontSize: '2.2rem', margin: '0 0 1rem 0' }}>Waiting for Next Round</h2>
               <p style={{ color: 'var(--text-secondary)', fontSize: '1.1rem', maxWidth: '440px', lineHeight: '1.6' }}>
-                The organizer is preparing the questions. Keep this window open — this screen will automatically refresh the moment the round goes live.
+                The organizer is preparing the questions. Keep this window open — this screen will automatically update the moment the round goes live.
               </p>
               
               <div style={{ 
@@ -165,7 +230,7 @@ export const Lobby = () => {
                 fontSize: '0.95rem'
               }}>
                 <span className="spin" style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '50%', border: '2px solid var(--accent-primary)', borderTopColor: 'transparent' }} />
-                <strong>Waiting for admin broadcast...</strong>
+                <strong>Connected — listening for admin broadcast…</strong>
               </div>
             </div>
           )}
