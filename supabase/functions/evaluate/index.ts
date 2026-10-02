@@ -123,7 +123,13 @@ serve(async (req) => {
     }
 
     if (errorMessage) {
-      return fail({ success: true, is_correct: false, error_details: errorMessage });
+      // NOTE: this MUST stay HTTP 200 — the body carries success:true and the
+      // frontend treats any success:false body as a throw. A 4xx status here
+      // would break every status-based client while looking identical.
+      return new Response(
+        JSON.stringify({ success: true, is_correct: false, error_details: errorMessage }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
     }
 
     let isCorrect = actualOutput === expectedOutput;

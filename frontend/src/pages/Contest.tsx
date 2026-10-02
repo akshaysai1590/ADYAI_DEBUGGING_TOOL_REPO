@@ -29,6 +29,10 @@ export const Contest = () => {
   const [submittedQuestions, setSubmittedQuestions] = useState<Set<string>>(new Set());
   const [showLangPicker, setShowLangPicker] = useState<boolean>(!selectedLanguage);
   const [timesUp, setTimesUp] = useState<boolean>(false);
+  // True when the active round has zero published questions in the DB. While
+  // true we must NOT fall back to DEFAULT_QUESTIONS stubs: their fake IDs can
+  // never pass judging, which looks exactly like "Run/Submit do nothing".
+  const [noDbQuestions, setNoDbQuestions] = useState<boolean>(false);
 
   // 1. Initial Load: Fetch active round & questions
   useEffect(() => {
@@ -77,9 +81,15 @@ export const Contest = () => {
           const parsed = qData.map(resolveMultiLangQuestion);
           setQuestions(parsed);
           setActiveQuestion(parsed[0]);
+          setNoDbQuestions(false);
           if (selectedLanguage) {
             loadCodeForQuestion(parsed[0], selectedLanguage as SupportedLanguage);
           }
+        } else {
+          // Active round exists but nothing published yet: show an explicit
+          // waiting state (with retry) instead of fake stub questions.
+          setQuestions([]);
+          setNoDbQuestions(true);
         }
       } else {
         // No active round
@@ -340,10 +350,28 @@ export const Contest = () => {
 
   // 6. Execute / Submit Code
   const executeCode = async (action: 'run' | 'submit') => {
+    // Fail loud and local — never send a doomed request and spin forever.
+    if (noDbQuestions || questions.length === 0) {
+      setOutput({ status: 'error', details: 'No questions published for this round yet. Wait for the admin to publish them, then press Retry.' });
+      return;
+    }
+    if (!selectedLanguage) {
+      setOutput({ status: 'error', details: 'Pick a language first.' });
+      setShowLangPicker(true);
+      return;
+    }
+    if (!code.trim()) {
+      setOutput({ status: 'error', details: 'Editor is empty — write your fix before running.' });
+      return;
+    }
     setOutput({ status: 'running' });
 
+    // Frontend timeout so a hung judge turns into a clear error instead of
+    // an endless spinner (which reads as "the button does nothing").
+    const EVALUATE_TIMEOUT_MS = 30000;
+
     try {
-      const data = await api.evaluate({
+      const evaluateCall = api.evaluate({
         question_id: activeQuestion.id,
         team_id: teamDbId,
         session_token: sessionToken,
@@ -351,6 +379,10 @@ export const Contest = () => {
         language: selectedLanguage,
         action,
       });
+      const timeout = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Execution timed out after 30s — the judge may be overloaded. Please try again.')), EVALUATE_TIMEOUT_MS);
+      });
+      const data = await Promise.race([evaluateCall, timeout]);
 
       if (data.is_correct === true) {
         setOutput({ status: 'pass', actual: data.actual_output });
@@ -391,6 +423,26 @@ export const Contest = () => {
   };
 
   const isQuestionLocked = submittedQuestions.has(activeQuestion.id);
+
+  if (noDbQuestions) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', backgroundColor: 'var(--bg-primary)', justifyContent: 'center', alignItems: 'center' }}>
+        <div className="card" style={{ maxWidth: '520px', width: '100%', padding: '2.5rem', textAlign: 'center' }}>
+          <Clock size={48} color="var(--accent-primary)" style={{ marginBottom: '1rem' }} />
+          <h2 style={{ color: 'var(--text-primary)', marginBottom: '0.5rem', fontSize: '1.6rem' }}>{roundName} is live</h2>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem', lineHeight: '1.6' }}>
+            No questions have been published for this round yet. Keep this window open and press retry once the admin publishes them.
+          </p>
+          <button className="btn" onClick={fetchActiveRoundAndQuestions} style={{ width: '100%', padding: '0.85rem' }}>
+            Retry — check for questions
+          </button>
+          <button className="btn-outline" onClick={() => navigate('/lobby')} style={{ width: '100%', padding: '0.85rem', marginTop: '0.75rem' }}>
+            Back to Lobby
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (showLangPicker) {
     return (

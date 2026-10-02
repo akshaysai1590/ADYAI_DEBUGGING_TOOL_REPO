@@ -6,6 +6,9 @@ import { api } from '../lib/api';
 import { Clock, Users, PlayCircle, LogOut, ArrowRight, Trophy, AlertCircle } from 'lucide-react';
 
 const HEARTBEAT_INTERVAL = 15_000; // 15 seconds
+const TEAM_COUNT_INTERVAL = 10_000; // 10 seconds — the count must poll, not
+// rely on realtime: anon clients cannot subscribe to the locked-down teams
+// table, so a realtime-only count goes stale and reads as "not updating".
 
 export const Lobby = () => {
   const navigate = useNavigate();
@@ -34,19 +37,23 @@ export const Lobby = () => {
       updatePresence('lobby');
     }, HEARTBEAT_INTERVAL);
 
-    // Set up realtime subscription for rounds
+    // Poll the online-team count: realtime on `teams` is dead for anon
+    // clients after the RLS lockdown, so without this the number freezes.
+    const countInterval = setInterval(() => {
+      fetchTeamCount();
+    }, TEAM_COUNT_INTERVAL);
+
+    // Set up realtime subscription for rounds (anon can still read rounds)
     const channel = supabase
       .channel('lobby-rounds')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rounds' }, () => {
         fetchLobbyState();
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'teams' }, () => {
-        fetchTeamCount();
-      })
       .subscribe();
 
     return () => {
       if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+      clearInterval(countInterval);
       supabase.removeChannel(channel);
     };
   }, [teamId, navigate]);
@@ -246,7 +253,7 @@ export const Lobby = () => {
             <div style={{ fontSize: '3rem', fontWeight: 800, color: 'var(--text-primary)' }}>
               {connectedTeamsCount}
             </div>
-            <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Teams registered in system</div>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Teams online now (updates every 10s)</div>
           </div>
           
           <div className="card" style={{ flex: 1 }}>

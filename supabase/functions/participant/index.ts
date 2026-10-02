@@ -104,7 +104,14 @@ serve(async (req) => {
       }
 
       case "team_count": {
-        const { count } = await supabase.from("teams").select("*", { count: "exact", head: true });
+        // Online teams only: heartbeat refreshes last_seen_at every 15s, and
+        // join blocks re-login within 45s — so a 60s window means "connected".
+        // Counting ALL rows here is what made the lobby number go stale.
+        const onlineSince = new Date(Date.now() - 60_000).toISOString();
+        const { count } = await supabase
+          .from("teams")
+          .select("*", { count: "exact", head: true })
+          .gte("last_seen_at", onlineSince);
         return json({ success: true, count: count ?? 0 });
       }
 
