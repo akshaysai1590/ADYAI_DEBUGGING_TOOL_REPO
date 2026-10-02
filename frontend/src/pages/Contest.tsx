@@ -4,7 +4,7 @@ import Editor, { useMonaco } from '@monaco-editor/react';
 import { Play, RotateCcw, Send, AlertTriangle, CheckCircle2, ShieldAlert, ArrowLeft, Clock, Code2 } from 'lucide-react';
 import { useAuthStore } from '../store/auth';
 import { supabase } from '../lib/supabase';
-import { api } from '../lib/api';
+import { api, isInvalidSessionError } from '../lib/api';
 import type { SupportedLanguage, MultiLangQuestion } from '../lib/questionTemplates';
 import { 
   DEFAULT_QUESTIONS, 
@@ -16,7 +16,7 @@ export const Contest = () => {
   const navigate = useNavigate();
   const monaco = useMonaco();
   const editorRef = useRef<any>(null);
-  const { teamId, teamDbId, displayName, selectedLanguage, setSelectedLanguage, sessionToken } = useAuthStore();
+  const { teamId, teamDbId, displayName, selectedLanguage, setSelectedLanguage, sessionToken, logout } = useAuthStore();
 
   const [questions, setQuestions] = useState<MultiLangQuestion[]>(DEFAULT_QUESTIONS);
   const [activeQuestion, setActiveQuestion] = useState<MultiLangQuestion>(DEFAULT_QUESTIONS[0]);
@@ -402,6 +402,14 @@ export const Contest = () => {
 
     } catch (err: any) {
       console.error('Execute error:', err);
+      if (isInvalidSessionError(err)) {
+        // Token rotated (login elsewhere) or stale persisted login: the fix
+        // is a fresh login, not retrying the judge.
+        alert('Session expired — this team logged in on another device or browser. Please log in again.');
+        logout();
+        navigate('/join');
+        return;
+      }
       setOutput({ status: 'error', details: err?.message || 'Network error' });
     }
   };

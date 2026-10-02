@@ -28,6 +28,15 @@ async function callEdge(name: string, body: Record<string, unknown>): Promise<an
   return data;
 }
 
+// Every edge function answers "Invalid session" when the browser's stored
+// session token no longer matches the DB row — e.g. the same team logged in
+// on a second device (each login rotates the token) or a stale persisted
+// login. Callers must treat this as "go log in again", not as a judge error.
+export function isInvalidSessionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return msg.toLowerCase().includes('invalid session');
+}
+
 // The admin password lives in Supabase secrets (ADHYANT_ADMIN_SECRET). It is
 // held in memory only (never persisted) and injected into every admin() call.
 let adminSecret: string | null = null;

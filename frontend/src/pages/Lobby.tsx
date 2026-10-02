@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../store/auth';
 import { supabase } from '../lib/supabase';
-import { api } from '../lib/api';
+import { api, isInvalidSessionError } from '../lib/api';
 import { Clock, Users, PlayCircle, LogOut, ArrowRight, Trophy, AlertCircle } from 'lucide-react';
 
 const HEARTBEAT_INTERVAL = 15_000; // 15 seconds
@@ -103,6 +103,11 @@ export const Lobby = () => {
       if (typeof res.count === 'number') setConnectedTeamsCount(res.count);
     } catch (err) {
       console.error('Team count error:', err);
+      if (isInvalidSessionError(err)) {
+        // Same-team-second-login or stale token: send them to get a fresh one.
+        logout();
+        navigate('/join');
+      }
     }
   };
 
